@@ -16,6 +16,7 @@ package com.mpx.infra_manager_java.service.mail;
 //           ③ SMTP 連不上（連線階段失敗：MailConnectException／ConnectException／UnknownHostException／NoRouteToHostException）
 //           不算一次重試、不寫 ERROR_TEXT，只在第一次與恢復時各記一次 log，並結束本輪不再試其餘信——斷線多久信都不會被
 //           耗光重試變 FAILED，恢復後自動補寄（待確認 ① 採 A；S8b 重寄頁上線後可再評估改回算重試）
+//           2026-10-13 S8b R4（Claude Opus 5.5）：加 sendNow（admin 測試寄信同步寄一次，與排程共用 processOne）
 // ============================================================
 
 import java.net.ConnectException;
@@ -139,6 +140,41 @@ public class MailWorker {
 			}
 		}
 		return sent;
+	}
+
+	/** 立即寄一封的結果（admin 測試寄信用） */
+	public enum SendOutcome {
+		/** 已寄出、標 SENT */
+		SENT,
+		/** SMTP 拒收或逾時，已記一次 TRY_CNT（未達上限仍是 PENDING，排程開著時稍後重試） */
+		FAILED_TRY,
+		/** SMTP 連不上：不計重試、信留在 PENDING */
+		UNREACHABLE,
+		/** 鎖不到或已不是 PENDING（例如排程剛好同時在寄） */
+		SKIPPED,
+		/** SMTP 未設定，沒有嘗試 */
+		NOT_CONFIGURED
+	}
+
+	/**
+	 * 立即寄一封指定的 PENDING 信（不等排程、不受 im.mail.enabled 影響），走與排程同一條鎖→寄→標記流程。
+	 * DB 例外原樣往外拋
+	 */
+	public SendOutcome sendNow(long id) {
+		if (!dispatcher.isConfigured()) {
+			return SendOutcome.NOT_CONFIGURED;
+		}
+		try {
+			Boolean ok = tx.execute(status -> processOne(id));
+			if (ok == null) {
+				return SendOutcome.SKIPPED;
+			}
+			return ok ? SendOutcome.SENT : SendOutcome.FAILED_TRY;
+		} catch (SmtpUnavailableException e) {
+			log.warn("信件 worker：立即寄送 outbox {} 時 SMTP 連不上（{}），不計重試", id,
+					e.getCause().getClass().getSimpleName());
+			return SendOutcome.UNREACHABLE;
+		}
 	}
 
 	/** 在交易內處理一封：鎖不到回 null；寄成功回 true；寄失敗（已記 TRY_CNT）回 false */

@@ -9,11 +9,15 @@ package com.mpx.infra_manager_java.dao.mail;
 //           worker 取信分兩步：findDueIds 不鎖、只找候選主鍵；lockPending 逐列 FOR UPDATE SKIP LOCKED
 //           （Oracle 不允許 FOR UPDATE 與 FETCH FIRST 同句，ORA-02014）。
 //           markFailedTry 的 SET 子句以舊值算 TRY_CNT+1，達上限直接標 FAILED
+//           2026-10-13 S8b R4（Claude Opus 5.5）：加 admin 寄信紀錄用的 findList／countList（篩狀態、建立日期、主旨關鍵字，
+//           LIKE 跳脫萬用字元，不讀 HTML_BODY）、resetFailed（只限 FAILED → PENDING、TRY_CNT 歸零）、
+//           findIdByTestToken（測試信寫入後依 META_JSON 的一次性 token 找回主鍵）
 // ============================================================
 
 import java.sql.Types;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -22,8 +26,11 @@ import org.springframework.stereotype.Repository;
 
 import com.mpx.common.db.DbClient;
 import com.mpx.infra_manager_java.config.DbSchema;
+import com.mpx.infra_manager_java.model.changerequest.CountRow;
 import com.mpx.infra_manager_java.model.mail.MailIdRow;
+import com.mpx.infra_manager_java.model.mail.MailListQuery;
 import com.mpx.infra_manager_java.model.mail.MailOutboxRow;
+import com.mpx.infra_manager_java.util.TaiwanTime;
 
 @Repository
 public class MailOutboxDao {
@@ -36,6 +43,9 @@ public class MailOutboxDao {
 
 	private static final String COLUMNS = "MAIL_OUTBOX_ID, TO_JSON, CC_JSON, BCC_JSON, MAIL_SUBJ, HTML_BODY, MAIL_STATUS_CODE,"
 			+ " TRY_CNT, ERROR_TEXT, SMTP_MSG_ID, SEND_DATE, META_JSON, CREATE_DATE, CREATE_BY, UPDATE_DATE, UPDATE_BY";
+	/** 列表用：不含 HTML_BODY、CC／BCC */
+	private static final String LIST_COLUMNS = "MAIL_OUTBOX_ID, TO_JSON, MAIL_SUBJ, MAIL_STATUS_CODE, TRY_CNT, ERROR_TEXT,"
+			+ " SEND_DATE, META_JSON, CREATE_DATE, UPDATE_DATE";
 
 	private final DbClient dbClient;
 	private final DbSchema schema;
@@ -122,6 +132,91 @@ public class MailOutboxDao {
 		p.put("err", errorText);
 		p.put("by", SYSTEM_USER);
 		return dbClient.update(itflowDb, sql, p);
+	}
+
+	// ---------- admin 寄信紀錄（S8b） ----------
+
+	/** 列表一頁（新到舊）；不讀 HTML_BODY（一封可能數百 KB） */
+	public List<MailOutboxRow> findList(MailListQuery q) {
+		String sql = "SELECT " + LIST_COLUMNS + listFrom(q) + " ORDER BY CREATE_DATE DESC, MAIL_OUTBOX_ID DESC"
+				+ " OFFSET :offset ROWS FETCH NEXT :size ROWS ONLY";
+		Map<String, Object> p = listParams(q);
+		p.put("offset", q.offset());
+		p.put("size", MailListQuery.PAGE_SIZE);
+		return dbClient.query(itflowDb, sql, p, MailOutboxRow.class);
+	}
+
+	/** 套用同樣篩選的總筆數 */
+	public long countList(MailListQuery q) {
+		String sql = "SELECT COUNT(*) AS CNT" + listFrom(q);
+		List<CountRow> rows = dbClient.query(itflowDb, sql, listParams(q), CountRow.class);
+		return rows.isEmpty() || rows.get(0).getCnt() == null ? 0L : rows.get(0).getCnt();
+	}
+
+	/** 重寄：只有 FAILED 會變回 PENDING、TRY_CNT 歸零（ERROR_TEXT 留著，下次寄送時覆蓋）。回更新列數，0＝不是 FAILED 或不存在 */
+	public int resetFailed(long mailOutboxId, String by) {
+		String sql = "UPDATE " + schema.table("IM_MAIL_OUTBOX")
+				+ " SET MAIL_STATUS_CODE = '" + STATUS_PENDING + "', TRY_CNT = 0, UPDATE_DATE = SYSDATE, UPDATE_BY = :by"
+				+ " WHERE MAIL_OUTBOX_ID = :id AND STATUS = 1 AND MAIL_STATUS_CODE = '" + STATUS_FAILED + "'";
+		return dbClient.update(itflowDb, sql, Map.of("id", mailOutboxId, "by", by));
+	}
+
+	/**
+	 * 測試信寫入後找回主鍵：DbClient 拿不到 IDENTITY 產生的鍵值，改用 META_JSON 的一次性 testToken 比對；
+	 * 只看同一人最近一小時寫的列，避免掃整張表。找不到回 null
+	 */
+	public Long findIdByTestToken(String token, String createdBy) {
+		String sql = "SELECT MAIL_OUTBOX_ID FROM " + schema.table("IM_MAIL_OUTBOX")
+				+ " WHERE CREATE_BY = :by AND CREATE_DATE >= SYSDATE - 1/24"
+				+ " AND JSON_VALUE(META_JSON, '$.testToken') = :token";
+		List<MailIdRow> rows = dbClient.query(itflowDb, sql, Map.of("by", createdBy, "token", token), MailIdRow.class);
+		return rows.isEmpty() ? null : rows.get(0).getMailOutboxId();
+	}
+
+	private String listFrom(MailListQuery q) {
+		StringBuilder sb = new StringBuilder(" FROM ").append(schema.table("IM_MAIL_OUTBOX")).append(" WHERE STATUS = 1");
+		if (q.status() != null) {
+			sb.append(" AND MAIL_STATUS_CODE = :status");
+		}
+		if (q.from() != null) {
+			sb.append(" AND CREATE_DATE >= :fromDate");
+		}
+		if (q.to() != null) {
+			sb.append(" AND CREATE_DATE < :toDateExclusive");
+		}
+		if (q.q() != null) {
+			sb.append(" AND UPPER(MAIL_SUBJ) LIKE :q ESCAPE '\\'");
+		}
+		return sb.toString();
+	}
+
+	private static Map<String, Object> listParams(MailListQuery q) {
+		Map<String, Object> p = new HashMap<>();
+		if (q.status() != null) {
+			p.put("status", q.status());
+		}
+		if (q.from() != null) {
+			p.put("fromDate", TaiwanTime.startOf(q.from()));
+		}
+		if (q.to() != null) {
+			p.put("toDateExclusive", TaiwanTime.startOf(q.to().plusDays(1)));
+		}
+		if (q.q() != null) {
+			p.put("q", likePattern(q.q()));
+		}
+		return p;
+	}
+
+	/** UPPER 後前後加 %，並把 LIKE 的萬用字元與跳脫字元本身跳脫（ESCAPE '\'；同 AppDao.likePattern） */
+	static String likePattern(String text) {
+		StringBuilder sb = new StringBuilder("%");
+		for (char c : text.toUpperCase(Locale.ROOT).toCharArray()) {
+			if (c == '%' || c == '_' || c == '\\') {
+				sb.append('\\');
+			}
+			sb.append(c);
+		}
+		return sb.append('%').toString();
 	}
 
 	private static SqlParameterValue clob(String value) {

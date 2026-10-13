@@ -72,6 +72,29 @@ class MailWorkerTest {
 	}
 
 	@Test
+	void 立即寄送_成功失敗連不上鎖不到未設定各自回對應結果() {
+		when(dao.lockPending(1L)).thenReturn(pending(1L, 0));
+		when(dao.lockPending(2L)).thenReturn(pending(2L, 0));
+		when(dao.lockPending(3L)).thenReturn(pending(3L, 0));
+		when(dao.lockPending(4L)).thenReturn(null);
+		when(dispatcher.send(any())).thenReturn(new SendResult("<id-1@px>", null))
+				.thenThrow(new MailSendException("550 rejected"))
+				.thenThrow(new MailSendException("connect", new ConnectException("refused")));
+
+		assertThat(worker.sendNow(1L)).isEqualTo(MailWorker.SendOutcome.SENT);
+		assertThat(worker.sendNow(2L)).isEqualTo(MailWorker.SendOutcome.FAILED_TRY);
+		assertThat(worker.sendNow(3L)).isEqualTo(MailWorker.SendOutcome.UNREACHABLE);
+		assertThat(worker.sendNow(4L)).isEqualTo(MailWorker.SendOutcome.SKIPPED);
+		verify(dao).markSent(1L, "<id-1@px>", null);
+		verify(dao).markFailedTry(eq(2L), anyString(), eq(5));
+		verify(dao, never()).markFailedTry(eq(3L), anyString(), anyInt());
+
+		when(dispatcher.isConfigured()).thenReturn(false);
+		assertThat(worker.sendNow(5L)).isEqualTo(MailWorker.SendOutcome.NOT_CONFIGURED);
+		verify(dao, never()).lockPending(5L);
+	}
+
+	@Test
 	void SMTP未設定時不碰DB() {
 		when(dispatcher.isConfigured()).thenReturn(false);
 

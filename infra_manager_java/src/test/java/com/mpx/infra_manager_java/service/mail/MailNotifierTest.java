@@ -258,6 +258,50 @@ class MailNotifierTest {
 		assertThat(m.meta()).containsEntry("event", "rejected");
 	}
 
+	// ---------- admin 測試寄信（S8b R4） ----------
+
+	@Test
+	void 測試信只寄指定地址且主旨加測試前綴與token() {
+		app("汰換", 1);
+		ApprRow appr = new ApprRow();
+		appr.setApprId(77L);
+		when(approvalDao.findCurrent(APP, 1)).thenReturn(Optional.of(appr));
+		when(approvalDao.findSteps(77L)).thenReturn(List.of(step(11, 1, "機房管理員", "PENDING")));
+
+		MailMessage m = notifier.buildTest(MailNotifier.EVENT_STEP_PENDING, APP, "me@pxmart.com.tw", "管理員", "A0001",
+				"tok-1");
+
+		assertThat(m.to()).containsExactly("me@pxmart.com.tw");
+		assertThat(m.subject()).isEqualTo("[測試] [待簽核] IM2026100001 汰換 - 機房管理員");
+		assertThat(m.htmlBody()).contains("機房管理員 您好");
+		assertThat(m.meta()).containsEntry("event", "test-step-pending").containsEntry("appId", APP)
+				.containsEntry("testToken", "tok-1");
+		assertThat(m.createdBy()).isEqualTo("A0001");
+		verifyNoInteractions(recipientDao, outbox);
+	}
+
+	@Test
+	void 測試退件信沒有簽核實例時用測試關卡名與操作人() {
+		app("汰換", 1);
+		when(approvalDao.findCurrent(APP, 1)).thenReturn(Optional.empty());
+
+		MailMessage m = notifier.buildTest(MailNotifier.EVENT_REJECTED, APP, "me@pxmart.com.tw", "管理員", "A0001", "t");
+
+		assertThat(m.subject()).isEqualTo("[測試] [退件] IM2026100001 汰換 - （測試關卡）");
+		assertThat(m.htmlBody()).contains("管理員").contains("（測試退件說明）");
+		verify(approvalDao, never()).findSteps(anyLong());
+	}
+
+	@Test
+	void 測試信申請單不存在回null_樣板不支援丟例外() {
+		when(appDao.findById(APP)).thenReturn(Optional.empty());
+
+		assertThat(notifier.buildTest(MailNotifier.EVENT_APPROVED, APP, "me@pxmart.com.tw", "管理員", "A0001", "t"))
+				.isNull();
+		assertThatThrownBy(() -> notifier.buildTest(MailNotifier.EVENT_RECALLED, APP, "me@pxmart.com.tw", "管理員",
+				"A0001", "t")).isInstanceOf(IllegalArgumentException.class);
+	}
+
 	@Test
 	void 該版次查不到簽核實例時退件群組仍查得到申請人執行人與治理() {
 		app("汰換", 2);

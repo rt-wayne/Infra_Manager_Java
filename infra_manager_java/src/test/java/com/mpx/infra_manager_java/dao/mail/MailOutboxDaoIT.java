@@ -12,15 +12,19 @@ package com.mpx.infra_manager_java.dao.mail;
 //           測試結束硬刪本測試建的列（只限 CREATE_BY='S8IT' 且主鍵在本測試記下的範圍）
 //           2026-10-08 S8 R3（Claude Opus 5.5）：加「業務交易 rollback 時 outbox 也沒有資料」（enqueue 在外層交易內、
 //           之後業務拋例外 → 本標記的列數不變；萬一殘留也記進清除名單）
+//           2026-10-13 S8b R4（Claude Opus 5.5）：加寄信紀錄查詢——列表依狀態／主旨關鍵字（不分大小寫、% _ 照字面）／
+//           日期區間篩選且總數一致、新到舊排序；resetFailed 只動 FAILED（PENDING 0 列）；依測試 token 找回主鍵且限建立者
 // ============================================================
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -39,9 +43,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.mpx.common.db.DbClient;
 import com.mpx.infra_manager_java.config.DbSchema;
 import com.mpx.infra_manager_java.model.mail.MailIdRow;
+import com.mpx.infra_manager_java.model.mail.MailListQuery;
 import com.mpx.infra_manager_java.model.mail.MailMessage;
 import com.mpx.infra_manager_java.model.mail.MailOutboxRow;
 import com.mpx.infra_manager_java.service.mail.MailOutboxService;
+import com.mpx.infra_manager_java.util.TaiwanTime;
 
 @SpringBootTest
 class MailOutboxDaoIT {
@@ -216,5 +222,59 @@ class MailOutboxDaoIT {
 		// 萬一沒有 rollback，也要記下來讓 cleanUp 刪掉，不在測試 DB 留殘列
 		after.stream().filter(id -> !before.contains(id)).forEach(created::add);
 		assertThat(after).as("enqueue 跟業務同一交易，業務 rollback 信也不留").isEqualTo(before);
+	}
+
+	@Test
+	void 列表依狀態與主旨關鍵字篩選且總數一致() {
+		String key = "S8IT列表" + System.nanoTime();
+		long sent = insertOne(key + " 寄出");
+		long failed = insertOne(key + " 失敗");
+		insertOne("S8IT 不相干");
+		dao.markSent(sent, "<s8it-list@example.invalid>", null);
+		dao.markFailedTry(failed, "測試", 1);
+		LocalDate today = TaiwanTime.today();
+
+		MailListQuery all = new MailListQuery(null, today.minusDays(1), today, key.toLowerCase(), 1);
+		assertThat(dao.findList(all)).extracting(MailOutboxRow::getMailOutboxId).containsExactly(failed, sent);
+		assertThat(dao.countList(all)).isEqualTo(2L);
+
+		MailListQuery onlyFailed = new MailListQuery(MailOutboxDao.STATUS_FAILED, today, today, key, 1);
+		assertThat(dao.findList(onlyFailed)).extracting(MailOutboxRow::getMailOutboxId).containsExactly(failed);
+		assertThat(dao.countList(onlyFailed)).isEqualTo(1L);
+
+		MailListQuery past = new MailListQuery(null, today.minusDays(10), today.minusDays(1), key, 1);
+		assertThat(dao.countList(past)).as("迄日是昨天時今天建的信不算").isZero();
+		assertThat(dao.countList(new MailListQuery(null, null, null, "S8IT%_不存在", 1))).as("% _ 照字面比對").isZero();
+	}
+
+	@Test
+	void 重設只限FAILED() {
+		long failed = insertOne("S8IT 重寄");
+		long pending = insertOne("S8IT 未寄");
+		dao.markFailedTry(failed, "測試", 1);
+
+		assertThat(dao.resetFailed(failed, MARKER)).isEqualTo(1);
+		MailOutboxRow r = dao.findById(failed);
+		assertThat(r.getMailStatusCode()).isEqualTo(MailOutboxDao.STATUS_PENDING);
+		assertThat(r.getTryCnt()).isZero();
+		assertThat(r.getUpdateBy()).isEqualTo(MARKER);
+		assertThat(due()).as("重設後馬上是候選").contains(failed);
+		assertThat(dao.resetFailed(failed, MARKER)).as("已是 PENDING 不再重設").isZero();
+		assertThat(dao.resetFailed(pending, MARKER)).isZero();
+	}
+
+	@Test
+	void 依測試token找回剛寫入的主鍵() {
+		String token = UUID.randomUUID().toString();
+		List<Long> before = idsByMarker();
+		dao.insert(TO_JSON, null, null, "S8IT token", HTML,
+				"{\"event\":\"test-approved\",\"appId\":\"S8IT-0001\",\"testToken\":\"" + token + "\"}", MARKER);
+		List<Long> after = idsByMarker();
+		after.removeAll(before);
+		created.addAll(after);
+
+		assertThat(dao.findIdByTestToken(token, MARKER)).isEqualTo(after.get(0));
+		assertThat(dao.findIdByTestToken(token, "OTHER")).as("別人建的不算").isNull();
+		assertThat(dao.findIdByTestToken(UUID.randomUUID().toString(), MARKER)).isNull();
 	}
 }

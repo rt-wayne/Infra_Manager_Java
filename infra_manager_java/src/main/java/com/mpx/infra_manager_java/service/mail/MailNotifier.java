@@ -11,6 +11,8 @@ package com.mpx.infra_manager_java.service.mail;
 //           樣板只用 th:text，所有欄位（含標題帶 <script>）都會被轉義；信內連結用 im.mail.site-url 組，不用 Host header
 //           2026-10-08 S8 R3：加 rejectedAtVersion（事件 8／9 執行端與治理退回只有版次，照單號＋版次找該版簽核實例）；
 //           找實例也在組信段內，查詢失敗一樣只記 warn 不影響退回
+//           2026-10-13 S8b R4（Claude Opus 5.5）：加 buildTest（admin 測試寄信，用真實申請單資料組待簽核／退件／核准完成，
+//           主旨加「[測試] 」）；核准完成的簽核紀錄抽成 approvalRecords 共用
 // ============================================================
 
 import java.sql.Timestamp;
@@ -18,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import org.slf4j.Logger;
@@ -55,6 +58,10 @@ public class MailNotifier {
 	/** 事件 8／9 的階段名（退件樣板的 stageName），R3 的 AppExecutionService 用 */
 	public static final String STAGE_EXECUTION = "執行階段";
 	public static final String STAGE_GOVERNANCE = "資訊治理審核";
+
+	/** admin 測試寄信可選的樣板（照舊系統測試頁的三種） */
+	public static final Set<String> TEST_TEMPLATES = Set.of(EVENT_STEP_PENDING, EVENT_REJECTED, EVENT_APPROVED);
+	static final String TEST_PREFIX = "[測試] ";
 
 	private static final String EMPTY = "—";
 
@@ -133,13 +140,7 @@ public class MailNotifier {
 				return null;
 			}
 			AppRow app = loadApp(appId);
-			List<ApprovalRecord> records = new ArrayList<>();
-			for (ApprStepRow s : approvalDao.findSteps(apprId)) {
-				if ("APPROVED".equals(s.getStepStatusCode())) {
-					records.add(new ApprovalRecord(nz(s.getStepName()), nz(s.getUserName()),
-							nz(TaiwanTime.formatDateTime(s.getDecideDate()))));
-				}
-			}
+			List<ApprovalRecord> records = approvalRecords(approvalDao.findSteps(apprId));
 			String subject = "[核准完成] " + app.getAppId() + " " + nz(app.getAppTitle());
 			Map<String, Object> model = baseModel(app, subject);
 			model.put("records", records);
@@ -241,7 +242,72 @@ public class MailNotifier {
 		});
 	}
 
+	// ---------- admin 測試寄信（S8b R4） ----------
+
+	/**
+	 * 用一張真實申請單的資料組一封測試信（照舊系統測試頁：待簽核、退件、核准完成三種），收件人只有 to、
+	 * 主旨加「[測試] 」；meta 的 event 為「test-樣板名」、另帶 testToken 供寫入後找回主鍵。
+	 * 申請單不存在回 null；樣板名不在 TEST_TEMPLATES 丟 IllegalArgumentException。不寫 outbox（由呼叫端 enqueue）
+	 */
+	public MailMessage buildTest(String template, String appId, String to, String operatorName, String by,
+			String testToken) {
+		if (!TEST_TEMPLATES.contains(template)) {
+			throw new IllegalArgumentException("不支援的測試樣板");
+		}
+		AppRow app = appDao.findById(appId).orElse(null);
+		if (app == null) {
+			return null;
+		}
+		long apprId = approvalDao.findCurrent(appId, verNo(app)).map(ApprRow::getApprId).orElse(NO_APPR_ID);
+		List<ApprStepRow> steps = apprId == NO_APPR_ID ? List.of() : approvalDao.findSteps(apprId);
+		ApprStepRow current = DecisionPolicy.currentStep(steps);
+		String stepName = current == null ? "（測試關卡）" : nz(current.getStepName());
+		String base = app.getAppId() + " " + nz(app.getAppTitle());
+		String subject;
+		Map<String, Object> model;
+		String html;
+		switch (template) {
+			case EVENT_STEP_PENDING -> {
+				subject = TEST_PREFIX + "[待簽核] " + base + " - " + stepName;
+				model = baseModel(app, subject);
+				model.put("stepName", stepName);
+				model.put("isResubmit", verNo(app) > 1);
+				html = render("mail/step-pending", model);
+			}
+			case EVENT_REJECTED -> {
+				subject = TEST_PREFIX + "[退件] " + base + " - " + stepName;
+				model = baseModel(app, subject);
+				model.put("stageName", stepName);
+				model.put("rejecterName", nz(operatorName));
+				model.put("memo", "（測試退件說明）請補充風險評估章節。");
+				html = render("mail/rejected", model);
+			}
+			default -> {
+				subject = TEST_PREFIX + "[核准完成] " + base;
+				model = baseModel(app, subject);
+				model.put("records", approvalRecords(steps));
+				html = render("mail/approved", model);
+			}
+		}
+		Map<String, Object> meta = new LinkedHashMap<>();
+		meta.put("event", "test-" + template);
+		meta.put("appId", appId);
+		meta.put("testToken", testToken);
+		return MailMessage.of(List.of(to), subject, html, meta, by);
+	}
+
 	// ---------- 共用 ----------
+
+	private static List<ApprovalRecord> approvalRecords(List<ApprStepRow> steps) {
+		List<ApprovalRecord> records = new ArrayList<>();
+		for (ApprStepRow s : steps) {
+			if ("APPROVED".equals(s.getStepStatusCode())) {
+				records.add(new ApprovalRecord(nz(s.getStepName()), nz(s.getUserName()),
+						nz(TaiwanTime.formatDateTime(s.getDecideDate()))));
+			}
+		}
+		return records;
+	}
 
 	/**
 	 * 組信（builder）失敗只記 warn 不往外拋；builder 回 null 表示不用寄；寫 outbox 的例外原樣往外拋

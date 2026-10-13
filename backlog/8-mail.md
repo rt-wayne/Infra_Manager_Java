@@ -55,6 +55,6 @@
 ### S8b admin 信件頁與重寄
 | 回合 | 內容 | 狀態 |
 |------|------|------|
-| R4 | `controller/admin/AdminMailController`、`service/mail/AdminMailService`、DAO 補查詢；WebMvcTest（非 admin 403、預設密碼 403、重寄非 FAILED 409） | 待開工 |
+| R4 | `controller/admin/AdminMailController`、`service/mail/AdminMailService`、DAO 補查詢；WebMvcTest（非 admin 403、預設密碼 403、重寄非 FAILED 409） | 完成（2026-10-13；另加 `GET /api/admin/mail/settings` 給測試信頁顯示設定（無密碼）；測試寄信 appId 必填（同舊系統）、樣板限待簽核／退件／核准完成、SMTP 未設定直接 409 不寫 outbox；DbClient 拿不到主鍵，改在 META_JSON 放一次性 `testToken` 找回再 `MailWorker.sendNow` 同步寄一次；列表 q 只比對主旨、只回收件人數不回地址；重寄保留 ERROR_TEXT 供對照；`MailOutboxDaoIT` 補 3 案例寫好未跑；單元 445 全綠） |
 | R5 | 前端：`types/mail.ts`、`api/adminMail.ts`、三頁、路由、`HomeView` 入口；型別檢查＋build；1024 寬不橫捲 | 待開工 |
 | 階段末 | verify；`code-reviewer`；**重寄驗收（2026-10-08 使用者裁示 ①A：維持「SMTP 連不上不計重試」，連不上時信停 PENDING、恢復後自動寄出）**：`im.mail.override-to` 暫改成會被 SMTP 拒收的地址 → 重試 5 次達上限 → FAILED → 改回 → 按重寄 → SENT；若公司 SMTP 先收下再退信、造不出 FAILED，改用 JDBC 把一封種子信標成 FAILED 再測重寄。另驗「連不上 → 一直 PENDING → 改回 → 自動寄出」；測試信頁實寄一封；PRD／CHANGELOG 補齊 | 待開工 |
