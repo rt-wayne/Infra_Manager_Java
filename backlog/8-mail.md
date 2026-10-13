@@ -8,7 +8,7 @@
 ## 已拍板
 - **2026-10-07**：① 第 56 項＝維持舊系統做法、SMTP 憑證驗證關閉（`mail.smtp.ssl.trust=*`；CHANGELOG 於 S8 結案列出）；② 同意引入 `spring-boot-starter-mail` 與 `spring-boot-starter-thymeleaf`；③ SMTP 連線沿用舊系統 `config/smtp.json`：`mail.pxmart.com.tw`、port 25、不加密、無帳號認證、寄件人 `Infra-Manager@pxmart.com.tw`（值不進版控）
 - **2026-10-08 使用者「全部依建議」（architect 開工分析）**：
-  - **① SMTP 與信件設定＝B**：連線值放後端 `application.properties` 真檔（`spring.mail.*`＋`im.mail.*`），將來若需認證才把密碼放環境變數 `IM_SMTP_PASSWORD`；S8 結案時改寫 PRD 環境變數表（約第 422～426 行）
+  - **① SMTP 與信件設定＝B**：連線值放後端 `application.properties` 真檔（`spring.mail.*`＋`im.mail.*`），將來若需認證才把密碼放環境變數 `IM_SMTP_PASSWORD`；PRD「環境設定」已於 S8a 階段末改寫
   - **② 申請人收件 email＝A**：以帳號主檔 `IM_USER.EMAIL` 為準、空的才用填單值 `IM_APP.APPLY_EMAIL`（填單值只當聯絡資訊，不當收件依據）
   - 測試信箱 `ciliao@pxmart.com.tw`；驗收時 `im.mail.override-to` 填它，所有收件人改寄到此
   - S8 切成 **S8a（後端寄信，R1～R3）** 與 **S8b（admin 信件頁與重寄，R4～R5）** 兩個階段，各自跑 verify／review／PRD／CHANGELOG
@@ -50,7 +50,7 @@
 | R1 | 基礎設施：`pom.xml` 加兩套件；`config/MailProperties`、`MailSchedulingConfig`；`dao/mail/MailOutboxDao`（寫入、查候選、逐列鎖、標 SENT／重試／FAILED）；`model/mail/*`；`service/mail/MailOutboxService`（enqueue）、`MailDispatcher`（寄送包裝）、`MailWorker`；`application.properties.example` 加鍵；單元測試（worker 狀態轉移，SMTP mock）；`MailOutboxDaoIT`（寫好不跑）。若做到 DAO＋enqueue 已過半，worker 拆 R1b | 完成（2026-10-08；worker 未拆、一回合做完；另加 `findById` 供 S8b 用、`im.mail.retry-backoff-minutes`／`initial-delay-ms` 兩鍵） |
 | R2 | 6 份樣板＋明細片段；`dao/mail/MailRecipientDao`（join 型）；`service/mail/MailNotifier`（組信）；`AppFlowService` 接事件 1～6；先查證只通知關卡；單元測試（標題帶 `<script>` 被轉義、去重、0 收件人不寫入）；修既有 AppFlowService 測試 | 完成（2026-10-08；只通知關卡舊系統也沒寄 → 不做知會樣板，登記 BACKLOG 第 110 項 ④；另加 `im.mail.site-name` 鍵；事件 7～10 的 `MailNotifier` 方法已寫好、R3 只接呼叫） |
 | R3 | `AppExecutionService` 接事件 7～10；IT 補「業務 rollback 時 outbox 也沒資料」 | 完成（2026-10-08；退件的簽核實例 ID 由 `MailNotifier.rejectedAtVersion` 在組信時用既有 `ApprovalDao.findCurrent` 查，查不到用 -1、失敗只略過；rollback IT 寫在 `MailOutboxDaoIT`、階段末跑） |
-| 階段末 | `./mvnw verify`；`code-reviewer`；本機真檔 `im.mail.enabled=true`＋`override-to=ciliao@`，經 3201 走流程，**待簽核、退件、核准完成三種信寄到測試信箱**；PRD／CHANGELOG 補齊（CHANGELOG 列第 56 項憑證驗證維持關閉、舊系統 Host header 組連結已修）；PRD 註明「舊系統 admin 可撤回、新系統只限申請人」 | 進行中（2026-10-08：verify 40 IT 全綠、`code-reviewer` 完成、阻擋 3 項已修 `1c3ec0a`、非阻擋登記 BACKLOG 第 111 項；實寄驗收改由 Claude 用種子單打 API 觸發（裁示 ②A），等使用者補六個鍵與給 DB 密碼；PRD／CHANGELOG 未補） |
+| 階段末 | `./mvnw verify`；`code-reviewer`；本機真檔 `im.mail.enabled=true`＋`override-to=ciliao@`，經 3201 走流程，**待簽核、退件、核准完成三種信寄到測試信箱**；PRD／CHANGELOG 補齊（CHANGELOG 列第 56 項憑證驗證維持關閉、舊系統 Host header 組連結已修）；PRD 註明「舊系統 admin 可撤回、新系統只限申請人」 | 完成（2026-10-13：verify 40 IT 全綠、`code-reviewer` 阻擋 3 項已修 `1c3ec0a`、非阻擋登記 BACKLOG 第 111 項；實寄驗收改由 Claude 經 API 觸發（裁示 ②A），9 封全部 SENT、使用者收信確認；PRD／CHANGELOG 已補，CHANGELOG 2026-10-13 S8a 列） |
 
 ### S8b admin 信件頁與重寄
 | 回合 | 內容 | 狀態 |
