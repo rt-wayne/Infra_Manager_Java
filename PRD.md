@@ -1,6 +1,7 @@
 # Infra Manager（Java 版）
 
-> 遠端倉庫：https://github.com/rt-wayne/Infra_Manager.git（預設分支 `main`）
+> 遠端倉庫：https://github.com/rt-wayne/Infra_Manager_Java.git（預設分支 `main`；已封存唯讀）
+> **本專案已停止開發（2026-10-16）**：使用者裁示原 Infra_Manager 改整併進「機房與帳號權限管理系統」（repo `rt-wayne/im_acct_insp`，即將改名 `rt-wayne/infra_manager`），以該專案為底、本專案的業務層與 DDL 當搬移來源（該專案 BACKLOG 第 69 項）。本檔僅供搬移時參考。
 > 本檔描述**已拍板的目標系統**。標「待定，見 BACKLOG.md 第 N 項」的部分尚未裁示，以 BACKLOG 為準。
 
 ## 專案概述
